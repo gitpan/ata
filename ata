@@ -1,0 +1,745 @@
+#!/usr/bin/perl
+########################################################################
+#
+# $Id: ata,v 1.12 2004/09/06 13:01:35 gosha Exp $
+#
+# Copyright (c) 2004 Okunev Igor <gosha@prv.mts-nn.ru>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+# GNU General Public License for more details.
+# See LICENSE for details
+#
+########################################################################
+use strict;
+use Getopt::Long;
+use IO::File;
+use Fcntl qw( :flock );
+use locale;
+use vars qw($VERSION);
+
+($VERSION='$Revision: 1.12 $')=~s/^\S+\s+(\S+)\s+.*/$1/;
+
+#=pod
+#
+#	sub new - инициализация данных.
+#
+#=cut
+sub new {
+	my $self = bless {
+#
+# Настройки, задаются из командной строки ( Те, что ниже типа по умолчанию )
+#
+			conf => {
+				file		=> [ '=s', undef, 'Apache TransferLog file' ],
+
+				format		=> [ '=s', '^(\\S+)\\s(\\S+)\\s(\\S+)\\s\\[(((\\d{2})/(\\w+)/(\\d{4})):((\\d{2}):(\\d{2}):(\\d{2}))\\s+[^\]]*?)\\]\\s\\"(\\w+)\\s((?:/~([^/]+))?((?:[^?\s]+)?/)([^?/]+?(?:\.([^.?/]+))?)?(?:\?(\\S*))?)\\s(\\w+\\/\\d+\\.\\d+)"\\s(\\d+)\\s(\\d+|-)', 'Log format regexp' ],
+
+				f			=> [ '=s@', [ qw/host login user datetime date date_day date_mon date_year time time_hour time_min time_sec method request req_user req_path req_name req_ext req_qstring proto lstatus byte/ ], 'Names of the fields a log file' ],
+
+				gb			=> [ '=s@', [ qw/Method Host/ ], 'Group by...' ],
+
+				order_by	=> [ '=s@', [ 'Count' ], 'Sort order by... Count, Size, and other fields from `-gb`' ],
+
+				txt			=> [ '!', 0, 'Output into plain-text format' ],
+
+				help		=> [ '!', 0, 'This help' ],
+
+				unit		=> [ '=s', 'M', 'Unit of traffic (B/K/M/G)' ],
+
+				tr_size_fld	=> [ '=s', 'byte', 'Field name for traffic size determination' ],
+
+				desc		=> [ '!', 0, 'Reverse sorting' ],
+
+				show		=> [ '!', 0, 'Visible work' ],
+
+				'dump'		=> [ '=s', undef, 'Dump incorrect log strings to file `-dump`' ]
+			},
+#
+# Регистро-независимые параметры
+#
+			icase_param	=> [ qw/f gb order_by out/ ],
+#
+# Данные для отчета
+#
+			result		=> {},
+
+			_all_size	=> 0,
+			_all_count	=> 0,
+		};
+
+	return $self;
+}
+
+#=pod
+#
+#	sub conf - Чтение/установка конфигурационных переменных
+#
+#=cut
+sub conf {
+	my $self = shift;
+
+#
+# Если число параметров 2 то устанавливаем значение переменной,
+# и возвращаем установленное значение
+#
+	if ( $#_ >= 1 ) {
+		if ( defined $_[0] and exists $self->{'conf'}->{ lc $_[0] } ) {
+			if ( defined $_[1] ) {
+				$self->{'conf'}->{ lc $_[0] }->[1] = $_[1];
+			} else {
+				undef $self->{'conf'}->{ lc $_[0] }->[1];
+			}
+			return $self->{'conf'}->{ lc $_[0] }->[1];
+		} else {
+			return undef;
+		}
+	} elsif( defined $_[0] ) {
+#
+# Просто возвращаем значение запрашиваемой переменной
+#
+		if ( defined $_[0] and exists $self->{'conf'}->{ lc $_[0] } ) {
+			return $self->{'conf'}->{ lc $_[0] }->[1];
+		} else {
+			return undef;
+		}
+	} else {
+#
+# Если вызвали без параметров то возвращаем или массив с именами всех
+# переменных, или андеф....
+#
+		if ( wantarray ) {
+			return keys %{ $self->{'conf'} }
+		} else {
+			return undef;
+		}
+	}
+}
+
+#=pod
+#
+#	sub init_opt - Инициализация параметров командной строки в хеш conf
+#
+#=cut
+sub init_opt {
+	my $self = shift;
+	my ( %t_h, $key );
+
+	local $_;
+
+	GetOptions( \%t_h, map { $_ . $self->{'conf'}->{$_}->[0] } keys %{ $self->{'conf'} } );
+
+	foreach $key ( keys %t_h ) {
+		if ( ref $t_h{$key} eq 'ARRAY' ) {
+			$self->conf( $key => [ @{$t_h{$key}} ] );
+		} elsif ( ref $t_h{$key} eq 'HASH' ) {
+			$self->conf( $key => { %{$t_h{$key}} } );
+		} elsif ( ! ref $t_h{$key} ) {
+			$self->conf( $key => $t_h{$key} );
+		}
+	}
+
+	return 1;
+}
+
+#=pod
+#
+#	sub help - вывод справки о параметрах командной строки...
+#
+#=cut
+sub help {
+	my $self = shift;
+
+	warn "\n\nCommand line arguments:\n\n";
+
+	my $max_len = length( ( sort { length($b) <=> length($a) } keys %{ $self->{'conf'} } )[0] );
+
+	foreach my $param ( sort keys %{ $self->{'conf'} } ) {
+		warn sprintf "  %-$max_len" . "s - %s [ %s ]\n",
+										ucfirst $param,
+										($self->{'conf'}->{$param}->[2] || '???'),
+										( ref $self->{'conf'}->{$param}->[1] eq 'ARRAY' ?
+											join( ',', @{$self->{'conf'}->{$param}->[1]} ) : $self->{'conf'}->{$param}->[1] );
+	}
+
+	return 1;
+}
+
+#=pod
+#
+#	sub read_log - читаем лог файл
+#
+#=cut
+sub read_log {
+	my $self = shift;
+
+	my $fh	= new IO::File;
+
+	unless ( $fh->open('<' . $self->conf( 'file' ) ) ) {
+		die "Can't open file ", $self->conf('file'), " [ $! ]\n";
+	}
+
+	flock( $fh, LOCK_SH );
+
+	my $regex = $self->conf('format');
+
+	my $traffic_size_field = $self->conf( 'tr_size_fld');
+
+	my $chunks_name = [ '', @{ $self->conf('f') } ];
+
+	my $show_work = $self->conf( 'show');
+
+	my ( @group_by, @fields_id, $log_fh  );
+
+#
+# Вичисляем только нужные элементы массива...
+# для некоторого увеличения производительности.
+#
+	{
+		my %f_cache;
+		my %uniq_fields;
+		my $ind = 0;
+
+		foreach my $f_n ( @$chunks_name ) {
+			$f_cache{$f_n} = $ind++;
+		}
+
+#
+# Поля учавствующие в группировке
+#
+		foreach my $gb ( @{ $self->conf('gb') } ) {
+			unless ( exists $f_cache{$gb} ) {
+				die "Field `$gb` not defined in the `-f`\n";
+			} else {
+#
+# Теоретически дупы сказываются только на скорости работы,
+# корректность выполнения не страдает..., но лучше от них
+# избавится...
+#
+				unless ( exists $uniq_fields{$gb} ) {
+					push @group_by, $gb;
+					push @fields_id, $f_cache{ $gb };
+					$uniq_fields{$gb} = 1;
+				}
+			}
+		}
+#
+# ...в сортировке могут быть использованы
+# любые поля из `-gb` а также 'count', 'size'
+#
+# Ограничение на наименования полей из `-gb`  а не из `-f`
+# связано с тем, что в процессе группировки теряется уникальность
+# всех полей кроме тех, что описаны в `-gb`...
+#
+		$uniq_fields{'count'}	= 1;
+		$uniq_fields{'size'}	= 1;
+
+		foreach my $ob ( @{ $self->conf('order_by') } ) {
+			unless ( exists $uniq_fields{$ob} ) {
+				die "Field `$ob` not defined in the `-gb`\n";
+			}
+		}
+#
+# Размер трафика нам всяко нужен
+#
+		unless ( exists $uniq_fields{ $traffic_size_field } ) {
+			push @fields_id, $f_cache{ $traffic_size_field };
+		}
+	}
+#
+# Если просили то откроем лог и скинем туда все нераспознанные
+# строки из лог файла
+#
+	if ( defined $self->conf( 'dump' ) ) {
+		$log_fh = new IO::File;
+		
+		unless ( $log_fh->open('>' . $self->conf( 'dump' ) ) ) {
+			die "Can't open file ", $self->conf('dump'), " [ $! ]\n";
+		}
+
+		flock( $log_fh, LOCK_EX );
+	}
+#
+# Просигнализируем о начале работы...
+#
+	if ( $show_work ) {
+		warn "Read log file.\n";
+	} else {
+		warn "Read log file, for visible this process use `-show` key. Please wait...\n";
+	}
+
+	while ( my $str = <$fh> ) {
+		chomp $str;
+#
+# Проверка на корректность входных данных ( или параметра -format )...
+#
+		unless ( $str =~ m#$regex#o ) {
+			warn "Hm..., incorrect log file format... [ $. ]\n";
+			if ( defined $log_fh ) {
+				print $log_fh "$str\n";
+			}
+			next;
+		}
+#
+# Разложили куски лога согласно их названиям...
+#
+# Дальнейшего увеличения производительности можно достичь предварительно
+# разобрав строку регекспа и удалив от туда неиспользуемые `()`
+#
+		my $ind = 0;
+		my %log;
+
+		no strict;
+		foreach my $r_i ( @fields_id ) {
+			$log{ $chunks_name->[$r_i] } = defined ${$r_i} ? ${$r_i} : '-';
+		}
+		use strict;
+
+		my $key = join( "\x00", @log{ @group_by } );
+#
+# Для поддержки сортировки по любому полю из `-gb`,
+# плюс два дополнительных: count, size
+#
+		unless ( exists $self->{ 'result' }->{ $key } ) {
+			$self->{ 'result' }->{ $key } = { %log };
+		}
+
+		$self->{ 'result' }->{ $key }->{ 'count' }++;
+		$self->{ 'result' }->{ $key }->{ 'size' } += $log{ $traffic_size_field };
+#
+# Для вычисления процентов
+#
+		$self->{ '_all_count' }++;
+		$self->{ '_all_size' } += $log{ $traffic_size_field };
+#
+# Чтоб было видно что не висим...
+#
+		if ( $show_work ) {
+			warn $self->{ '_all_count' }, "\r";
+		}
+	}
+
+	if ( $show_work ) {
+		warn "\nSorting...\n";
+	}
+
+	if ( defined $log_fh ) {
+		close $log_fh;
+	}
+
+	close $fh;
+}
+
+#=pod
+#
+# sub output_result - выводим результат подсчета
+#
+#=cut
+sub output_result {
+	my $self = shift;
+
+#
+# Зададимся единицей измерения для трафика ( B, K, M, G )
+#
+	my $unit_name = uc $self->conf( 'unit' );
+
+	my $unit;
+
+	if ( $unit_name eq 'K' ) {
+		$unit = 1024;
+	} elsif ( $unit_name eq 'M' ) {
+		$unit = 1024 * 1024;
+	} elsif ( $unit_name eq 'G' ) {
+		$unit = 1024 * 1024 * 1024;
+	} else {
+		$unit = 1;
+	}
+
+#
+# Посортированные ключи
+#
+	my @sort_keys;
+
+	if ( $self->conf( 'desc' ) ) {
+		@sort_keys = sort { $self->compare( $b, $a ) } keys %{ $self->{ 'result' } };
+	} else {
+		@sort_keys = sort { $self->compare( $a, $b ) } keys %{ $self->{ 'result' } };
+	}
+#
+# Проверка на наличие данных в логе...
+#
+	unless ( $self->{ '_all_count' } ) {
+		die "Hm..., log file is empty or incorrect regexp format ( `-format` ) ???\n";
+	}
+
+#
+# Формат вывода текст/хтмл
+#
+	unless ( $self->conf( 'txt' ) ) {
+#
+# Цвета для выделения `группировки`...
+#
+		my @color = ( 'red', 'blue' );
+
+		my $color_ind = 0;
+
+		printf '<html><body><table border=1><tr><th>%s</th><th colspan=2>%s</th><th colspan=2>%s</th></tr>',
+				 join( ', ', map {
+		 							$_ = '<font color="'. $color[$color_ind = abs($color_ind-1)] .'">' . html_quote( ucfirst($_) ) . '</font>'
+								} @{$self->conf('gb')} ),
+				 'Count',
+				 'Size';
+
+		foreach my $key ( @sort_keys ) {
+
+			$color_ind = 0;
+#
+# Такой 'изврат' с цвето-выделением принят из за того, что
+# в верху ( где данный ключ генерируется из кусков ), число
+# итераций для генерации несколько больше чем здесь ( в
+# результирующем хеше ), соответственно производительность несколько
+# выше...
+#
+			printf '<tr><td align="left">%s</td><td align="right">%d</td><td align="right">%.2f%%</td><td align="right">%f %s</td><td align="right">%.2f%%</td></tr>',
+				 	join( ', ', map {
+			 							$_ = '<font color="'. $color[$color_ind = abs($color_ind-1)] .'">' . html_quote( $_ ) . '</font>'
+									} split( /\x00/, $key ) ),
+					$self->{ 'result' }->{ $key }->{ 'count' },
+					( $self->{ 'result' }->{ $key }->{ 'count' } / $self->{ '_all_count' } * 100 ),
+					( $self->{ 'result' }->{ $key }->{ 'size' } / $unit ),
+					$unit_name,
+					( $self->{ 'result' }->{ $key }->{ 'size' } / ( $self->{ '_all_size' } || 1 ) * 100 );
+		}
+
+		printf '<tr><td align="left">&nbsp;</td><td align="right">%d</td><td>&nbsp;</td><td align="right">%f %s</td><td>&nbsp;</td></tr></table></body></html>',
+					$self->{ '_all_count' },
+					( $self->{ '_all_size' } / $unit ),
+					$unit_name;
+	} else {
+#
+# Текстовый вывод данных
+#
+		printf "%-50s\t%-7s\t%-10s\n",
+				 join( ', ', map { ucfirst } @{$self->conf('gb')} ),
+				 'Count',
+				 'Size';
+
+		printf "%-50s\t%-7s\t%-10s\n",
+				'-'x50, '-'x7, '-'x10;
+
+		foreach my $key ( @sort_keys ) {
+			printf "%-50s\t%7s\t%f %s\n",
+				 	join( ', ', split( /\x00/, $key ) ),
+					$self->{ 'result' }->{ $key }->{ 'count' },
+					( $self->{ 'result' }->{ $key }->{ 'size' } / $unit ),
+					$unit_name;
+		}
+
+		printf "%-50s\t%-7s\t%-10s\n",
+				' ', '-'x7, '-'x10;
+
+		printf "%-50s\t%7s\t%f %s\n",
+					' ',
+					$self->{ '_all_count' },
+					( $self->{ '_all_size' } / $unit ),
+					$unit_name;
+	}
+}
+
+#=pod
+#
+# sub compare - процедура сортировки данных перед выводом....
+#
+#=cut
+sub compare {
+	my ( $self, $l_a, $l_b ) = @_ ;
+
+#
+# Перебираем все поля по которым просили сортировать...
+#
+	foreach my $field ( @{ $self->conf( 'order_by' ) } ) {
+#
+# Определим тип данных, и сравним в соответствии с данным типом...
+# хотя определения число/строка путем проверки на наличие в строке
+# чего либо кроме 0-9 не есть совсем правильно, но я чего то не
+# припомню наличия в логах дробных чисел.... Короче все цифры сортируем
+# как числовые значения иначе как строки.
+#
+		my $l_a_val = $self->{ 'result' }->{ $l_a }->{ $field };
+		my $l_b_val = $self->{ 'result' }->{ $l_b }->{ $field };
+
+		if ( $l_a_val =~ /[^\d]/ || $l_b_val =~ /[^\d]/ ) {
+			if ( $l_a_val cmp $l_b_val ) {
+				return $l_a_val cmp $l_b_val;
+			}
+		} else {
+			if ( $l_a_val <=> $l_b_val ) {
+				return $l_a_val <=> $l_b_val;
+			}
+		}
+	}
+
+	return 0;
+}
+
+#=pod
+#
+# sub html_quote - квотинг данных для html формата
+#
+#=cut
+sub html_quote {
+	my $str = shift;
+
+	$str =~ s#&#&amp;#gs;
+	$str =~ s#"#&quot;#gs;
+	$str =~ s#<#&lt;#gs;
+	$str =~ s#>#&gt;#gs;
+
+	return $str;
+}
+
+#=pod
+#
+# sub main - от сюда дергаем все ниточки
+#
+#=cut
+sub main {
+	my $self = new();
+
+#
+# Проинициализировали параметры командной строки
+#
+	$self->init_opt();
+
+#
+# Конвертируем регистро-независимые значения переменных
+# т.е. все имена храним в нижнем регистре
+#
+	foreach my $p_n ( @{ $self->{'icase_param'} } ) {
+		my $p = $self->conf( $p_n );
+
+		unless ( ref $p eq 'ARRAY' ) {
+			$self->conf( $p_n => lc $p );
+		} else {
+			for my $i ( 0 .. $#{$p} ) {
+				$p->[$i] = lc $p->[$i];
+			}
+		}
+	}
+
+#
+# ...не просили ли нас о помощи...
+#
+	if ( $self->conf('help') or ! length $self->conf('file') ) {
+		$self->help();
+		exit;
+	}
+
+#
+# Разобрали конфиг
+#
+	$self->read_log();
+#
+# Вывели результат
+#
+	$self->output_result();
+#
+# ...свалили...
+#
+	return 1;
+}
+
+###############################################################################
+							main();
+###############################################################################
+
+=pod
+
+=head1 NAME
+
+ata - Apache Transfer-log Analyzer.
+
+=head1 DESCRIPTION
+
+ata is the report generator of traffic size and request count.
+
+=head1 SYNOPSIS
+
+ata <OPTIONS>
+
+=head1 OPTIONS
+
+=over 10
+
+=item -file < file_name >
+
+log file name.
+
+=item -format < regexp >
+
+regular expression for parsing log file.
+
+=item -f < field_name >
+
+names of the fields a log file. Number of the `()` into regexp must correspond with number of the parameters `-f`. Multiple parameter.
+
+=item -gb < field_name >
+
+group by... Fields names for groupping report file records... Any names from parameter `-f`. For example `... -gb req_user -gb method` group by req_user ( /~user_name ) and method ( GET || POST | HEAD ... etc ). Multiple parameter. See examples for more info.
+
+=item -order_by < field_name >
+
+order by... Ordering output report records. Any names from parameter `-gb` and two reserved words: 'count' - request count, 'size' - traffic size. Multiple parameter.
+
+=item -txt
+
+output report into plain-text format.
+
+=item -help
+
+help.
+
+=item -unit < unit_name >
+
+unit of traffic ( B, K, M, G - Byte, Kilobyte, Megabyte, Gigabyte  ).
+
+=item -tr_size_fld < field_name >
+
+field name ( from parameters `-f` ) for traffic size determination...
+
+=item -desc
+
+reverse sorting.
+
+=item -show
+
+visible work.
+
+=item -dump < log_file_name >
+
+dump incorrect log strings to `log_file_name`
+
+=back
+
+=head1 EXAMPLES
+
+log file ( logs ):
+
+ cs4-mts-18.dialup.mts-nn.ru - - [09/Jun/2002:02:22:18 +0400] "GET /~gosha/path/nidex.html?param HTTP/1.0" 200 1160
+ 217.77.106.6 - - [09/Jun/2002:12:30:17 +0400] "GET /~gosha/hidden_index.html HTTP/1.0" 200 1704
+ 66.28.250.171 - - [09/Jun/2002:20:18:28 +0400] "GET /~gosha/info.html HTTP/1.0" 200 2087
+ gorka.gcom.ru - - [13/Jun/2002:10:29:47 +0400] "GET /~gosha/ HTTP/1.0" 200 1160
+ 66.28.210.71 - - [15/Jun/2002:10:18:21 +0400] "GET /~alex/cgi-bin/view.cgi?id=1 HTTP/1.0" 200 122087
+ 66.28.210.71 - - [15/Jun/2002:10:19:21 +0400] "GET /~alex/cgi-bin/view.cgi?id=12 HTTP/1.0" 200 3087
+
+
+command line:
+
+ ata -file logs -gb req_user -gb date_day -gb lstatus -txt
+
+result:
+
+ Req_user, Date_day, Lstatus                             Count   Size
+ --------------------------------------------------      ------- ----------
+ gosha,09,200                                                  3 0,004722 M
+ alex,15,200                                                   2 0,119375 M
+ gosha,13,200                                                  1 0,001106 M
+                                                         ------- ----------
+                                                               6 0,125203 M
+
+
+command line:
+
+  ata -file logs -gb req_user -gb req_name -txt
+
+result:
+
+ Req_user, Req_name                                      Count   Size
+ --------------------------------------------------      ------- ----------
+ alex,view.cgi                                                 2 0,119375 M
+ gosha,nidex.html                                              1 0,001106 M
+ gosha,-                                                       1 0,001106 M
+ gosha,hidden_index.html                                       1 0,001625 M
+ gosha,info.html                                               1 0,001990 M
+                                                         ------- ----------
+                                                               6 0,125203 M
+
+command line:
+
+ ata -txt -file logs -gb req_user -gb req_ext -order_by req_user -order_by count
+
+result:
+
+ Req_user, Req_ext                                       Count   Size
+ --------------------------------------------------      ------- ----------
+ alex,cgi                                                      2 0.119375 M
+ gosha,-                                                       1 0.001106 M
+ gosha,html                                                    3 0.004722 M
+                                                         ------- ----------
+                                                               6 0,125203 M
+
+
+=head1 NOTES
+
+'Count' and 'Size' - reserved words, do not use this with parameter `-f`.
+
+Percent calculating only for html report format.
+
+regexp ( `-format` ) matching next log file format ( by default ):
+
+ 66.28.210.71 gosha - [15/Jun/2002:10:19:21 +0400] "GET /~alex/cgi-bin/view.cgi?id=12 HTTP/1.0" 200 3087
+
+`-f` contain names of the fields ( for ^^^ this string, by default ):
+
+ host		= 66.28.210.71
+ login		= gosha
+ user		= -
+ datetime	= 15/Jun/2002:10:19:21 +0400
+ date		= 15/Jun/2002
+ date_day	= 15
+ date_mon	= Jun
+ date_year	= 2002
+ time		= 10:19:21
+ time_hour	= 10
+ time_min	= 19
+ time_sec	= 21
+ method		= GET
+ request	= /~alex/cgi-bin/view.cgi?id=12
+ req_user	= alex
+ req_path	= /cgi-bin
+ req_name	= view.cgi
+ req_ext	= cgi
+ req_qstring= id=12
+ proto		= HTTP/1.0
+ lstatus	= 200
+ byte		= 3087
+
+any names from first column may be used with parameter `-gb`.
+
+=head1 AUTHOR
+
+ Okunev Igor V.  mailto:igor@prv.mts-nn.ru
+                 http://www.mts-nn.ru/~gosha
+                 ICQ 106183300
+
+=head1 OFFICIAL SITE
+
+http://www.mts-nn.ru/~gosha/perl-scripts/ata/
+
+=head1 COPYRIGHT
+
+Copyright (c) 2004 Okunev Igor
+
+This program is free software; you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation; either version 2 of the License, or
+(at your option) any later version.
+
+=cut
+

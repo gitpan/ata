@@ -1,0 +1,172 @@
+=pod
+
+=head1 ИМЯ
+
+ata - Apache Transfer-log Analyzer.
+
+=head1 ОПИСАНИЕ
+
+ata - скрипт для генерации отчета о количестве запросов и размере трафика.
+
+=head1 СИНТАКСИС
+
+ata <ОПЦИИ>
+
+=head1 ОПЦИИ
+
+=over 10
+
+=item -file < file_name >
+
+имя log файла.
+
+=item -format < regexp >
+
+регулярное выражение для разбора лог файла.
+
+=item -f < field_name >
+
+имена полей в лог файле. Количество `()` в регулярном выражении должно соответствовать количеству параметров `-f`. Параметр можно использовать многократно.
+
+=item -gb < field_name >
+
+group by... Имена полей по которым производится группировка в отчете. Любые имена из `-f`. Для примера `... -gb req_user -gb method` группировать по req_user ( /~user_name ) и method ( GET || POST | HEAD ... etc ).  Параметр можно использовать многократно. Для большей информации смотрите примеры.
+
+=item -order_by < field_name >
+
+order by... Имена полей для сортировки отчета. Любые имена из `-gb` и два зарезервированных слова: 'count' - количество запросов, 'size' - размер трафика. Параметр можно использовать многократно. 
+
+=item -txt
+
+отдать отчет в текстовом формате.
+
+=item -help
+
+помощь.
+
+=item -unit < unit_name >
+
+единица измерения трафика ( B, K, M, G - Байты, Килобайты, Мегабайты, Гигабайты ).
+
+=item -tr_size_fld < field_name >
+
+имя поля ( из `-f` ) для определения количества трафика.
+
+=item -desc
+
+обратная сортировка.
+
+=item -show
+
+показать процесс отработки лог файла.
+
+=back
+
+=head1 ПРИМЕРЫ
+
+содержимое лог файла ( logs ):
+
+ cs4-mts-18.dialup.mts-nn.ru - - [09/Jun/2002:02:22:18 +0400] "GET /~gosha/path/nidex.html?param HTTP/1.0" 200 1160
+ 217.77.106.6 - - [09/Jun/2002:12:30:17 +0400] "GET /~gosha/hidden_index.html HTTP/1.0" 200 1704
+ 66.28.250.171 - - [09/Jun/2002:20:18:28 +0400] "GET /~gosha/info.html HTTP/1.0" 200 2087
+ gorka.gcom.ru - - [13/Jun/2002:10:29:47 +0400] "GET /~gosha/ HTTP/1.0" 200 1160
+ 66.28.210.71 - - [15/Jun/2002:10:18:21 +0400] "GET /~alex/cgi-bin/view.cgi?id=1 HTTP/1.0" 200 122087
+ 66.28.210.71 - - [15/Jun/2002:10:19:21 +0400] "GET /~alex/cgi-bin/view.cgi?id=12 HTTP/1.0" 200 3087
+
+
+командная строка:
+
+ ata -file logs -gb req_user -gb date_day -gb lstatus -txt
+
+результат:
+
+ Req_user, Date_day, Lstatus                             Count   Size
+ --------------------------------------------------      ------- ----------
+ gosha,09,200                                                  3 0,004722 M
+ alex,15,200                                                   2 0,119375 M
+ gosha,13,200                                                  1 0,001106 M
+                                                         ------- ----------
+                                                               6 0,125203 M
+
+
+командная строка:
+
+  ata -file logs -gb req_user -gb req_name -txt
+
+результат:
+
+ Req_user, Req_name                                      Count   Size
+ --------------------------------------------------      ------- ----------
+ alex,view.cgi                                                 2 0,119375 M
+ gosha,nidex.html                                              1 0,001106 M
+ gosha,-                                                       1 0,001106 M
+ gosha,hidden_index.html                                       1 0,001625 M
+ gosha,info.html                                               1 0,001990 M
+                                                         ------- ----------
+                                                               6 0,125203 M
+
+командная строка:
+
+ ata -txt -file logs -gb req_user -gb req_ext -order_by req_user -order_by count
+
+результат:
+
+ Req_user, Req_ext                                       Count   Size
+ --------------------------------------------------      ------- ----------
+ alex,cgi                                                      2 0.119375 M
+ gosha,-                                                       1 0.001106 M
+ gosha,html                                                    3 0.004722 M
+                                                         ------- ----------
+                                                               6 0,125203 M
+
+
+=head1 Примечания
+
+'Count' и 'Size' - зарезервированные слова, не используйте их в `-f`.
+
+Расчет процентов производится только при генерации отчета в html формате.
+
+Регулярное выражение ( `-format` ) обрабатывает строки следующего
+формата ( по умолчанию ) :
+
+ 66.28.210.71 gosha - [15/Jun/2002:10:19:21 +0400] "GET /~alex/cgi-bin/view.cgi?id=12 HTTP/1.0" 200 3087
+
+`-f` содержит следующие поля ( для ^^^ данной строки, по умолчанию ):
+
+ host		= 66.28.210.71
+ login		= gosha
+ user		= -
+ datetime	= 15/Jun/2002:10:19:21 +0400
+ date		= 15/Jun/2002
+ date_day	= 15
+ date_mon	= Jun
+ date_year	= 2002
+ time		= 10:19:21
+ time_hour	= 10
+ time_min	= 19
+ time_sec	= 21
+ method		= GET
+ request	= /~alex/cgi-bin/view.cgi?id=12
+ req_user	= alex
+ req_path	= /cgi-bin
+ req_name	= view.cgi
+ req_ext	= cgi
+ req_qstring= id=12
+ proto		= HTTP/1.0
+ lstatus	= 200
+ byte		= 3087
+
+любые именя из первой колонки можно использовать для задания параметра `-gb`.
+
+=head1 АВТОР
+
+ Okunev Igor V.  mailto:igor@prv.mts-nn.ru
+                 http://www.mts-nn.ru/~gosha
+                 ICQ 106183300
+
+=head1 АВТОРСКОЕ ПРАВО
+
+Copyright (c) 2004 Okunev Igor
+
+=cut
+
