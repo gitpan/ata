@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 ########################################################################
 #
-# $Id: ata,v 1.12 2004/09/06 13:01:35 gosha Exp $
+# $Id: ata,v 1.13 2004/09/07 09:00:07 gosha Exp $
 #
 # Copyright (c) 2004 Okunev Igor <gosha@prv.mts-nn.ru>
 #
@@ -24,7 +24,7 @@ use Fcntl qw( :flock );
 use locale;
 use vars qw($VERSION);
 
-($VERSION='$Revision: 1.12 $')=~s/^\S+\s+(\S+)\s+.*/$1/;
+($VERSION='$Revision: 1.13 $')=~s/^\S+\s+(\S+)\s+.*/$1/;
 
 #=pod
 #
@@ -45,7 +45,7 @@ sub new {
 
 				gb			=> [ '=s@', [ qw/Method Host/ ], 'Group by...' ],
 
-				order_by	=> [ '=s@', [ 'Count' ], 'Sort order by... Count, Size, and other fields from `-gb`' ],
+				order_by	=> [ '=s@', [ qw/Method Count/ ], 'Sort order by... Count, Size, and other fields from `-gb`' ],
 
 				txt			=> [ '!', 0, 'Output into plain-text format' ],
 
@@ -55,8 +55,6 @@ sub new {
 
 				tr_size_fld	=> [ '=s', 'byte', 'Field name for traffic size determination' ],
 
-				desc		=> [ '!', 0, 'Reverse sorting' ],
-
 				show		=> [ '!', 0, 'Visible work' ],
 
 				'dump'		=> [ '=s', undef, 'Dump incorrect log strings to file `-dump`' ]
@@ -64,7 +62,7 @@ sub new {
 #
 # Регистро-независимые параметры
 #
-			icase_param	=> [ qw/f gb order_by out/ ],
+			icase_param	=> [ qw/f gb order_by tr_size_fld/ ],
 #
 # Данные для отчета
 #
@@ -364,13 +362,7 @@ sub output_result {
 #
 # Посортированные ключи
 #
-	my @sort_keys;
-
-	if ( $self->conf( 'desc' ) ) {
-		@sort_keys = sort { $self->compare( $b, $a ) } keys %{ $self->{ 'result' } };
-	} else {
-		@sort_keys = sort { $self->compare( $a, $b ) } keys %{ $self->{ 'result' } };
-	}
+	my @sort_keys = sort { $self->compare( $a, $b ) } keys %{ $self->{ 'result' } };
 #
 # Проверка на наличие данных в логе...
 #
@@ -383,21 +375,58 @@ sub output_result {
 #
 	unless ( $self->conf( 'txt' ) ) {
 #
+# Визуальное выделение по группам, разделяем все
+# группировки кроме последней.
+# ( Выделение происходит только при условии, что параметры сортировки
+# эквивалентны параметром группировки, вплоть до порядка
+# следования )
+#
+		my $level = -1;
+	
+		my @group_by = @{ $self->conf('gb') };
+		my @order_by = @{ $self->conf('order_by') };
+
+		foreach my $i ( 0 .. $#group_by - 1 ) {
+			unless ( $order_by[$i] eq $group_by[$i] ) {
+				last;
+			} else {
+				$level = $i;
+			}
+		}
+#
 # Цвета для выделения `группировки`...
 #
 		my @color = ( 'red', 'blue' );
-
+		
 		my $color_ind = 0;
 
 		printf '<html><body><table border=1><tr><th>%s</th><th colspan=2>%s</th><th colspan=2>%s</th></tr>',
-				 join( ', ', map {
+#
+# fix: херится @{$self->conf('gb')}
+#
+				join( ', ', map {
 		 							$_ = '<font color="'. $color[$color_ind = abs($color_ind-1)] .'">' . html_quote( ucfirst($_) ) . '</font>'
 								} @{$self->conf('gb')} ),
-				 'Count',
-				 'Size';
+				'Count',
+				'Size';
 
+#
+# Текущие значения `группировки`
+#
+		my @current_gb = ();
+		
 		foreach my $key ( @sort_keys ) {
-
+			for my $i ( 0 .. $level ) {
+				if ( $self->{ 'result' }->{ $key }->{ $group_by[$i] } ne $current_gb[$i] ) {
+					print '<tr><td align="left" colspan="5">&nbsp;</td></tr>';
+					last;
+				}
+			}
+			
+			for my $i ( 0 .. $level ) {
+				$current_gb[$i] = $self->{ 'result' }->{ $key }->{ $group_by[$i] };
+			}
+			
 			$color_ind = 0;
 #
 # Такой 'изврат' с цвето-выделением принят из за того, что
@@ -406,7 +435,7 @@ sub output_result {
 # результирующем хеше ), соответственно производительность несколько
 # выше...
 #
-			printf '<tr><td align="left">%s</td><td align="right">%d</td><td align="right">%.2f%%</td><td align="right">%f %s</td><td align="right">%.2f%%</td></tr>',
+			printf '<tr><td align="left">%s</td><td align="right">%d</td><td align="right">%.3f%%</td><td align="right">%f %s</td><td align="right">%.3f%%</td></tr>',
 				 	join( ', ', map {
 			 							$_ = '<font color="'. $color[$color_ind = abs($color_ind-1)] .'">' . html_quote( $_ ) . '</font>'
 									} split( /\x00/, $key ) ),
@@ -471,8 +500,18 @@ sub compare {
 # припомню наличия в логах дробных чисел.... Короче все цифры сортируем
 # как числовые значения иначе как строки.
 #
-		my $l_a_val = $self->{ 'result' }->{ $l_a }->{ $field };
-		my $l_b_val = $self->{ 'result' }->{ $l_b }->{ $field };
+# Все поля кроме `count` и `size` сортируем по восходящей
+# эти два по нисходящей...
+#
+		my ( $l_a_val, $l_b_val );
+		
+		if ( $field eq 'count' or $field eq 'size' ) {
+			$l_a_val = $self->{ 'result' }->{ $l_b }->{ $field };
+			$l_b_val = $self->{ 'result' }->{ $l_a }->{ $field };
+		} else {
+			$l_a_val = $self->{ 'result' }->{ $l_a }->{ $field };
+			$l_b_val = $self->{ 'result' }->{ $l_b }->{ $field };
+		}
 
 		if ( $l_a_val =~ /[^\d]/ || $l_b_val =~ /[^\d]/ ) {
 			if ( $l_a_val cmp $l_b_val ) {
@@ -613,10 +652,6 @@ unit of traffic ( B, K, M, G - Byte, Kilobyte, Megabyte, Gigabyte  ).
 
 field name ( from parameters `-f` ) for traffic size determination...
 
-=item -desc
-
-reverse sorting.
-
 =item -show
 
 visible work.
@@ -730,7 +765,7 @@ any names from first column may be used with parameter `-gb`.
 
 =head1 OFFICIAL SITE
 
-http://www.mts-nn.ru/~gosha/perl-scripts/ata/
+http://www.mts-nn.ru/~gosha/perl-scripts/ata/hidden_index.html
 
 =head1 COPYRIGHT
 

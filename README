@@ -44,8 +44,6 @@ OPTIONS
               field name ( from parameters `-f` ) for traffic size
               determination...
 
-    -desc     reverse sorting.
-
     -show     visible work.
 
     -dump < log_file_name >
@@ -150,7 +148,7 @@ AUTHOR
                      ICQ 106183300
 
 OFFICIAL SITE
-    http://www.mts-nn.ru/~gosha/perl-scripts/ata/
+    http://www.mts-nn.ru/~gosha/perl-scripts/ata/hidden_index.html
 
 COPYRIGHT
     Copyright (c) 2004 Okunev Igor
